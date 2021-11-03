@@ -1,3 +1,6 @@
+#time "on"
+#r "nuget: Akka.FSharp"
+
 open System
 open Akka.Actor
 open Akka.FSharp
@@ -26,7 +29,7 @@ type ChordMessage =
     | SetSuccessorPredecessor of bigint
     | Stabilize
     | Notify of bigint
-    | FixFingers of int
+    | FixFingers
     | Route of string * bigint * int
     | StartRouting of int
     
@@ -48,6 +51,7 @@ let Chord (mailbox:Actor<_>) =
     let mutable predecessor = -1I
     let mutable successorsPredecessor = -1I
     let mutable nodeId = BigInteger.Parse(mailbox.Self.Path.Name)
+    let mutable next = 0
     let nodeAddr = "akka://Chord/user/"
     let initiatorRef = select "akka://Chord/user/Initiator" system
 
@@ -66,7 +70,10 @@ let Chord (mailbox:Actor<_>) =
         else
             while (fingers.[i]>=0I && (fingers.[i]>=id && fingers.[i]<=nodeId)) do
                 i <- i-1
-        fingers.[i]
+        if i < 0 then
+            nodeId
+        else 
+            fingers.[i]
                 
     let rec loop () = actor {
         let! message = mailbox.Receive()
@@ -82,26 +89,30 @@ let Chord (mailbox:Actor<_>) =
                                                     predecessor <- -1I
                                                     nodeInRing <! FindSuccessor(nodeId, nodeId, 0)
 
-        | UpdateNodeDetails                     ->  system.Scheduler.ScheduleTellRepeatedly(TimeSpan.FromMilliseconds(1000.0), TimeSpan.FromMilliseconds(500.0), mailbox.Self, FixFingers(0))
-                                                    system.Scheduler.ScheduleTellRepeatedly(TimeSpan.FromMilliseconds(1000.0), TimeSpan.FromMilliseconds(500.0), mailbox.Self, FindSuccessorPredecessor)
+        | UpdateNodeDetails                     ->  system.Scheduler.ScheduleTellRepeatedly(TimeSpan.FromMilliseconds(1000.0), TimeSpan.FromMilliseconds(200.0), mailbox.Self, FixFingers)
+                                                    system.Scheduler.ScheduleTellRepeatedly(TimeSpan.FromMilliseconds(1000.0), TimeSpan.FromMilliseconds(200.0), mailbox.Self, FindSuccessorPredecessor)
 
-        | Stabilize                             ->  if (nodeId<successorsPredecessor && successorsPredecessor<fingers.[0]) then
+        | Stabilize                             ->  if (successorsPredecessor <> -1I &&
+                                                        ((fingers.[0]<nodeId && (fingers.[0]>successorsPredecessor || successorsPredecessor>nodeId)) || 
+                                                        (nodeId<successorsPredecessor && successorsPredecessor<fingers.[0]))) then
                                                         Array.set fingers 0 successorsPredecessor
                                                     
                                                     let successorRef = select (nodeAddr + (fingers.[0]|>string)) system
                                                     successorRef <! Notify(nodeId)
 
         | Notify(id)                            ->  if (predecessor = -1I || 
-                                                        (predecessor<id && id<nodeId)) then
+                                                        (predecessor<id && id<nodeId) ||
+                                                        (id > nodeId && (id>predecessor || id < nodeId))) then
                                                             predecessor <- id
 
 
-        | FixFingers(next)                      ->  let next = next + 1
+        | FixFingers                            ->  next <- next + 1
                                                     if next <= 159 then
                                                         let nodeRef = select (nodeAddr + (nodeId|>string)) system
                                                         let entry = nodeId + ((2.0** ((next-1)|>float)) |> bigint)
                                                         nodeRef <! FindSuccessor(nodeId, entry%((2.0**160.0)|>bigint), next)
-
+                                                    else
+                                                        next <- 0
 
         | FindSuccessor(source, id, index)      ->  //printfn "In find successor"
                                                     let idRef = select (nodeAddr+(source|>string)) system
@@ -216,6 +227,15 @@ let Initiator (mailbox:Actor<_>) =
     }
     loop()
 
-let intiator = spawn system "Initiator" Initiator
-intiator <! Init(nodesCount, requestCount)
-system.WhenTerminated.Wait()
+
+
+
+[<EntryPoint>]
+let main argv =
+
+    // Start of the algorithm - spawn Boss, the delgator
+    let intiator = spawn system "Initiator" Initiator
+    intiator <! Init(nodesCount, requestCount)
+    system.WhenTerminated.Wait()
+
+    0 // return an integer exit code
